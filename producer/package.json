@@ -1,0 +1,14 @@
+{
+  "name": "riallineamento-producer",
+  "version": "1.0.0",
+  "description": "Lambda producer – riallineamento consensi CRM/Rex",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/client-sqs": "^3.0.0",
+    "mysql2": "^3.0.0"
+  }
+}
