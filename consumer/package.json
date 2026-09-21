@@ -1,0 +1,12 @@
+{
+  "name": "riallineamento-consumer",
+  "version": "1.0.0",
+  "description": "Lambda consumer – riallineamento consensi CRM/Rex",
+  "main": "consumer.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  }
+}

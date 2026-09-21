@@ -1,0 +1,185 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Riallineamento massivo consensi CRM/Rex – Lambda + SQS + DLQ
+
+Parameters:
+  DbSecretName:
+    Type: String
+    Description: Nome del secret Secrets Manager con le credenziali DB (host, port, username, password)
+
+  DbName:
+    Type: String
+    Description: Nome del database sorgente
+
+  DbTable:
+    Type: String
+    Default: consensi
+    Description: Nome della tabella consensi (aggiornare con struttura da Antonio Croce)
+
+  PageSize:
+    Type: Number
+    Default: 500
+    Description: Numero di record letti dal DB per ogni pagina
+
+  ConsumerBatchSize:
+    Type: Number
+    Default: 10
+    Description: "Numero di messaggi SQS per batch consumer – da calibrare post rate limit Rex"
+
+  RexEndpointUrl:
+    Type: String
+    Default: "https://TODO"
+    Description: "Endpoint API Rex – da ricevere da Alessandro Paggio / Gianluca De Gennaro"
+
+  RexTimeoutMs:
+    Type: Number
+    Default: 10000
+    Description: Timeout chiamata Rex in millisecondi
+
+  AlertEmail:
+    Type: String
+    Default: ""
+    Description: "Email per alert CloudWatch DLQ (opzionale – lasciare vuoto per saltare)"
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+
+Resources:
+
+  # ── Dead Letter Queue ────────────────────────────────────────────────────────
+  RiallineamentoDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: riallineamento-consensi-dlq
+      MessageRetentionPeriod: 1209600  # 14 giorni
+
+  # ── Coda principale ──────────────────────────────────────────────────────────
+  RiallineamentoQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: riallineamento-consensi-queue
+      VisibilityTimeout: 60          # >= timeout Lambda consumer
+      MessageRetentionPeriod: 345600 # 4 giorni
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt RiallineamentoDLQ.Arn
+        maxReceiveCount: 3
+
+  # ── Lambda producer ──────────────────────────────────────────────────────────
+  ProducerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: riallineamento-consensi-producer
+      CodeUri: producer/
+      Handler: producer.handler
+      Timeout: 300   # 5 minuti
+      MemorySize: 512
+      Description: Legge il DB a pagine e pubblica su SQS
+      Environment:
+        Variables:
+          DB_SECRET_NAME: !Ref DbSecretName
+          DB_NAME: !Ref DbName
+          DB_TABLE: !Ref DbTable
+          SQS_QUEUE_URL: !Ref RiallineamentoQueue
+          PAGE_SIZE: !Ref PageSize
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt RiallineamentoQueue.QueueName
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}*"
+
+  # ── Lambda consumer ──────────────────────────────────────────────────────────
+  ConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: riallineamento-consensi-consumer
+      CodeUri: consumer/
+      Handler: consumer.handler
+      Timeout: 30
+      MemorySize: 256
+      Description: Legge SQS e chiama API Rex
+      Environment:
+        Variables:
+          REX_ENDPOINT_URL: !Ref RexEndpointUrl
+          REX_TIMEOUT_MS: !Ref RexTimeoutMs
+      Events:
+        SQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RiallineamentoQueue.Arn
+            BatchSize: !Ref ConsumerBatchSize
+            FunctionResponseTypes:
+              - ReportBatchItemFailures  # solo i messaggi falliti tornano in coda
+
+  # ── CloudWatch alarm DLQ ─────────────────────────────────────────────────────
+  DLQAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: riallineamento-consensi-dlq-not-empty
+      AlarmDescription: Messaggi in DLQ – analizzare CloudWatch Logs e avviare redrive
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt RiallineamentoDLQ.QueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ConsumerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: riallineamento-consensi-consumer-errors
+      AlarmDescription: "Errori Lambda consumer > 100 in 5 min – verificare disponibilità Rex"
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ConsumerFunction
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  ConsumerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: riallineamento-consensi-consumer-duration
+      AlarmDescription: "p95 duration Lambda consumer > 25s – possibile timeout Rex"
+      Namespace: AWS/Lambda
+      MetricName: Duration
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref ConsumerFunction
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 25000
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+Outputs:
+  QueueUrl:
+    Description: URL coda SQS principale
+    Value: !Ref RiallineamentoQueue
+
+  DLQUrl:
+    Description: URL Dead Letter Queue
+    Value: !Ref RiallineamentoDLQ
+
+  ProducerFunctionArn:
+    Description: ARN Lambda producer
+    Value: !GetAtt ProducerFunction.Arn
+
+  ConsumerFunctionArn:
+    Description: ARN Lambda consumer
+    Value: !GetAtt ConsumerFunction.Arn
