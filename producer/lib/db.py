@@ -4,8 +4,8 @@ import psycopg2.extras
 
 
 def create_connection(credentials: dict, host: str, port: int, db_name: str):
-    """PostgreSQL connection with exponential backoff (3 attempts: 0.5s, 1s, 2s)."""
-    delays = [0.5, 1.0, 2.0]
+    """PostgreSQL connection with exponential backoff (3 attempts: 0.5s, 1s)."""
+    delays = [0.5, 1.0, None]  # None = ultimo tentativo, nessuna attesa prima di sollevare
     last_err: Exception | None = None
     for delay in delays:
         try:
@@ -17,10 +17,14 @@ def create_connection(credentials: dict, host: str, port: int, db_name: str):
                 password=credentials["dmf_db_pass"],
                 connect_timeout=10,
             )
+            # Le scritture sul segnaposto devono essere visibili subito alle altre
+            # invocazioni: con una transazione implicita il lock non funzionerebbe.
+            conn.autocommit = True
             return conn
-        except psycopg2.OperationalError as e:
+        except psycopg2.Error as e:
             last_err = e
-            time.sleep(delay)
+            if delay is not None:
+                time.sleep(delay)
     raise last_err  # type: ignore[misc]
 
 

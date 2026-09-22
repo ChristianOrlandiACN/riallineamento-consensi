@@ -48,6 +48,37 @@ Parameters:
     Default: ""
     Description: Email per alert CloudWatch (opzionale – lasciare vuoto per saltare)
 
+  RunId:
+    Type: String
+    Default: riallineamento-2026-09
+    Description: >
+      Identificativo della campagna. Chiave nella tabella audit.consent_realign_state
+      e cartella di raggruppamento dell'audit su S3. Cambiarlo per avviare una
+      campagna nuova partendo da zero.
+
+  ProducerSchedule:
+    Type: String
+    Default: "rate(5 minutes)"
+    Description: >
+      Frequenza di riavvio del producer. Le invocazioni che si sovrappongono a una
+      già in corso escono subito senza fare nulla (lock sulla tabella di stato),
+      quindi un intervallo stretto non causa duplicati.
+
+  ProducerScheduleEnabled:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Default: "false"
+    Description: >
+      Lasciare false al deploy. Attivare solo quando la campagna deve partire,
+      cioè dopo il refresh dati e la creazione dell'indice sulla tabella sorgente.
+
+  LeaseSeconds:
+    Type: String
+    Default: "360"
+    Description: >
+      Durata del lock sul segnaposto, deve superare il timeout della Lambda (300s).
+      Se un'invocazione muore senza rilasciare, il lock scade e la successiva riprende.
+
 Globals:
   Function:
     Runtime: python3.14
@@ -64,18 +95,31 @@ Resources:
       CodeUri: producer/
       Handler: producer.handler
       Timeout: 300   # 5 minuti
-      Description: Legge RDS HOT a pagine e pubblica su SQS
+      MemorySize: 512
+      Description: Legge RDS HOT a pagine e pubblica su SQS, riprendendo dal segnaposto
       Environment:
         Variables:
           DB_SECRET_NAME: prod/dmf/db/hot
           DB_HOST: sky-dmf-prod-hot-db.cvmeoqosyucw.eu-west-1.rds.amazonaws.com
           DB_PORT: "6543"
           DB_NAME: sky-dmf-prod-hot-db
-          DB_SCHEMA: AUDIT
+          DB_SCHEMA: audit
           DB_TABLE: audit_sky_recs_recommendation
           SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
           PAGE_SIZE: "500"
           AUDIT_BUCKET: !Ref AuditBucket
+          RUN_ID: !Ref RunId
+          LEASE_SECONDS: !Ref LeaseSeconds
+      Events:
+        ScheduledRun:
+          Type: Schedule
+          Properties:
+            Name: crm-dmf-consent-producer-schedule
+            Schedule: !Ref ProducerSchedule
+            Enabled: !Ref ProducerScheduleEnabled
+            Description: >
+              Rilancia il producer finché la campagna non è completa. Quando lo stato
+              passa a 'completed' le invocazioni successive escono immediatamente.
 
   # ── Lambda consumer ──────────────────────────────────────────────────────────
   ConsumerFunction:
