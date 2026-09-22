@@ -8,16 +8,34 @@
 -- ogni decoder.
 --
 -- QUANDO: prima del caricamento dati. Su tabella vuota l'esecuzione è
--- immediata; dopo il caricamento delle 1.8M righe il punto 1 richiede
+-- immediata; dopo il caricamento delle 1.8M righe il punto 2 richiede
 -- tempo e prende lock sulla tabella.
 --
--- PRIMA DI ESEGUIRE: sostituire <UTENTE_LAMBDA> al punto 3 con l'utenza
--- applicativa della Lambda (campo dmf_db_user del secret prod/dmf/db/hot).
+-- PRIMA DI ESEGUIRE: sostituire <UTENTE_LAMBDA> con il nome dell'utenza
+-- applicativa (compare nei punti 1, 4 e 5).
 -- =============================================================================
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 1. INDICE SULLA TABELLA SORGENTE
+-- 1. UTENZA APPLICATIVA DELLA LAMBDA
+--
+-- Utenza dedicata al processo di riallineamento, distinta da quelle esistenti
+-- per poterne tracciare e revocare l'accesso in modo indipendente.
+-- La usa la sola Lambda producer: è l'unico componente che si connette al DB
+-- (consumer e reconciler lavorano su SQS, S3 e API Hermes).
+--
+-- Richiede privilegio CREATEROLE o superuser.
+--
+-- >>> SICUREZZA: non scrivere qui la password reale e non salvarla in questo
+-- >>> file. Generarla al momento dell'esecuzione e riporla su AWS Secrets
+-- >>> Manager nel secret prod/dmf/db/hot (campi dmf_db_user / dmf_db_pass).
+-- ─────────────────────────────────────────────────────────────────────────────
+
+CREATE ROLE <UTENTE_LAMBDA> WITH LOGIN PASSWORD '<PASSWORD_DA_GENERARE>';
+
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 2. INDICE SULLA TABELLA SORGENTE
 --
 -- audit_sky_recs_recommendation non ha attualmente alcun indice né vincolo.
 -- Il producer la legge a pagine ripetendo:
@@ -29,6 +47,8 @@
 -- permette di selezionare il consenso più recente per decoder nel caso la
 -- tabella contenga lo storico eventi anziché una riga per decoder (vedi
 -- domanda A in fondo).
+--
+-- Richiede di essere proprietari della tabella.
 -- ─────────────────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_audit_sky_recs_decoder_dt
@@ -36,7 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_sky_recs_decoder_dt
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 2. TABELLA DI STATO DEL PROCESSO
+-- 3. TABELLA DI STATO DEL PROCESSO
 --
 -- Il producer non riesce a leggere 1.8M record in una sola esecuzione (limite
 -- di 5 minuti per invocazione), quindi viene rilanciato automaticamente finché
@@ -58,12 +78,10 @@ CREATE TABLE IF NOT EXISTS audit.consent_realign_state (
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 3. PERMESSI PER L'UTENZA DELLA LAMBDA
+-- 4. PERMESSI DELL'UTENZA
 --
--- Scrittura richiesta SOLO sulla tabella di stato del punto 2.
+-- Scrittura richiesta SOLO sulla tabella di stato del punto 3.
 -- La tabella dei consensi resta in sola lettura.
---
--- >>> SOSTITUIRE <UTENTE_LAMBDA> PRIMA DI ESEGUIRE <<<
 -- ─────────────────────────────────────────────────────────────────────────────
 
 GRANT USAGE  ON SCHEMA audit                                TO <UTENTE_LAMBDA>;
@@ -72,7 +90,7 @@ GRANT SELECT, INSERT, UPDATE ON audit.consent_realign_state TO <UTENTE_LAMBDA>;
 
 
 -- ─────────────────────────────────────────────────────────────────────────────
--- 4. VERIFICA — eseguire dopo i punti precedenti
+-- 5. VERIFICA — eseguire dopo i punti precedenti
 -- ─────────────────────────────────────────────────────────────────────────────
 
 -- L'indice esiste?
@@ -81,12 +99,14 @@ FROM pg_indexes
 WHERE schemaname = 'audit'
   AND tablename  = 'audit_sky_recs_recommendation';
 
--- I permessi dell'utenza Lambda sono corretti?
--- Attesi: true, true, true
+-- I permessi dell'utenza sono corretti? Attesi: true, true, true
 SELECT
-    has_table_privilege('<UTENTE_LAMBDA>', 'audit.audit_sky_recs_recommendation', 'SELECT')        AS legge_sorgente,
-    has_table_privilege('<UTENTE_LAMBDA>', 'audit.consent_realign_state', 'INSERT')                AS scrive_stato,
-    has_table_privilege('<UTENTE_LAMBDA>', 'audit.consent_realign_state', 'UPDATE')                AS aggiorna_stato;
+    has_table_privilege('<UTENTE_LAMBDA>', 'audit.audit_sky_recs_recommendation', 'SELECT') AS legge_sorgente,
+    has_table_privilege('<UTENTE_LAMBDA>', 'audit.consent_realign_state', 'INSERT')         AS scrive_stato,
+    has_table_privilege('<UTENTE_LAMBDA>', 'audit.consent_realign_state', 'UPDATE')         AS aggiorna_stato;
+
+-- L'utenza NON deve poter scrivere sulla sorgente. Atteso: false
+SELECT has_table_privilege('<UTENTE_LAMBDA>', 'audit.audit_sky_recs_recommendation', 'UPDATE') AS scrive_sorgente;
 
 
 -- =============================================================================
@@ -106,7 +126,7 @@ SELECT
 -- B) Il refresh dei dati post-deploy è ADDITIVO oppure fa DROP/TRUNCATE
 --    a livello di schema?
 --
---    Se è invasivo, la tabella del punto 2 verrebbe azzerata a metà lavorazione
+--    Se è invasivo, la tabella del punto 3 verrebbe azzerata a metà lavorazione
 --    e il processo ripartirebbe da capo ripubblicando tutto. In quel caso va
 --    collocata in uno schema diverso da audit.
 --
