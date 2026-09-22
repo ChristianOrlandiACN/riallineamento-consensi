@@ -3,20 +3,24 @@ Transform: AWS::Serverless-2016-10-31
 Description: Riallineamento massivo consensi CRM/Rex – Lambda Producer/Consumer (Python)
 
 # ─── NOTE INFRASTRUTTURA ────────────────────────────────────────────────────────
-# Le code SQS (crm-dmf-consent-queue / crm-dmf-consent-dlq) e i ruoli IAM
-# (crm-dmf-consent-producer-role / crm-dmf-consent-consumer-role) sono già
-# creati esternamente (Terraform). Questo template gestisce solo le Lambda.
-# I security group Lambda sono in attesa da Terraform: passare l'ID tramite
-# il parametro LambdaSecurityGroupId al momento del deploy SAM.
+# Il rilascio avviene caricando zip a mano, non con `sam deploy`: questo file
+# vale come riferimento della configurazione attesa di ciascuna Lambda —
+# variabili d'ambiente, timeout, memoria, trigger e allarmi — da riprodurre in
+# console alla creazione delle funzioni.
+#
+# Già esistenti, creati esternamente (Terraform):
+#   code SQS   crm-dmf-consent-queue / crm-dmf-consent-dlq
+#   ruoli IAM  crm-dmf-consent-producer-role / crm-dmf-consent-consumer-role
+#   bucket S3  crm-dmf-consent-audit (eu-west-1)
+#              lifecycle consigliata: published/outcomes 90gg, summary 1 anno
+#
+# DA COMPLETARE: il producer si connette a un RDS in VPC privata, quindi
+# necessita di subnet e security group. Gli ID dei security group sono attesi
+# da Terraform; finché non vengono configurati sulla funzione, la connessione
+# al DB va in timeout.
 # ────────────────────────────────────────────────────────────────────────────────
 
 Parameters:
-
-  AuditBucket:
-    Type: String
-    Description: >
-      Nome del bucket S3 per i file di audit (published, outcomes, summary, reconcile).
-      Lifecycle consigliata: dettaglio (published/outcomes) 90gg, summary 1 anno.
 
   HermesBaseUrl:
     Type: String
@@ -107,7 +111,7 @@ Resources:
           DB_TABLE: audit_sky_recs_recommendation
           SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
           PAGE_SIZE: "500"
-          AUDIT_BUCKET: !Ref AuditBucket
+          AUDIT_BUCKET: crm-dmf-consent-audit
           RUN_ID: !Ref RunId
           LEASE_SECONDS: !Ref LeaseSeconds
           # Tetto di record per invocazione, 0 = nessun limite.
@@ -140,7 +144,7 @@ Resources:
           HERMES_BASE_URL: !Ref HermesBaseUrl
           HERMES_SECRET_NAME: !Ref HermesSecretName
           HERMES_TIMEOUT_MS: !Ref HermesTimeoutMs
-          AUDIT_BUCKET: !Ref AuditBucket
+          AUDIT_BUCKET: crm-dmf-consent-audit
       Events:
         SQSEvent:
           Type: SQS
@@ -216,7 +220,7 @@ Resources:
         report su S3 per quelli che richiedono intervento manuale.
       Environment:
         Variables:
-          AUDIT_BUCKET: !Ref AuditBucket
+          AUDIT_BUCKET: crm-dmf-consent-audit
           SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
           DLQ_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-dlq
 
