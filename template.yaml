@@ -1,132 +1,117 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Riallineamento massivo consensi CRM/Rex – Lambda + SQS + DLQ
+Description: Riallineamento massivo consensi CRM/Rex – Lambda Producer/Consumer (Python)
+
+# ─── NOTE INFRASTRUTTURA ────────────────────────────────────────────────────────
+# Le code SQS (crm-dmf-consent-queue / crm-dmf-consent-dlq) e i ruoli IAM
+# (crm-dmf-consent-producer-role / crm-dmf-consent-consumer-role) sono già
+# creati esternamente (Terraform). Questo template gestisce solo le Lambda.
+# I security group Lambda sono in attesa da Terraform: passare l'ID tramite
+# il parametro LambdaSecurityGroupId al momento del deploy SAM.
+# ────────────────────────────────────────────────────────────────────────────────
 
 Parameters:
-  DbSecretName:
+
+  AuditBucket:
     Type: String
-    Description: Nome del secret Secrets Manager con le credenziali DB (host, port, username, password)
-
-  DbName:
-    Type: String
-    Default: AUDIT
-    Description: Schema RDS sorgente
-
-  DbTable:
-    Type: String
-    Default: audit_sky_recs_recommendation
-    Description: Tabella consensi su schema AUDIT
-
-  PageSize:
-    Type: Number
-    Default: 500
-    Description: Numero di record letti dal DB per ogni pagina
-
-  ConsumerBatchSize:
-    Type: Number
-    Default: 10
-    Description: "Numero di messaggi SQS per batch consumer – da calibrare post rate limit Hermes/MDW"
+    Description: >
+      Nome del bucket S3 per i file di audit (published, outcomes, summary, reconcile).
+      Lifecycle consigliata: dettaglio (published/outcomes) 90gg, summary 1 anno.
 
   HermesBaseUrl:
     Type: String
     Default: "https://servizicollaudo.sky.it/hermes-st/v0"
-    Description: "Base URL API Hermes. Prod: https://servizi.sky.it/hermes/v0 | Collaudo: https://servizicollaudo.sky.it/hermes-st/v0"
+    Description: >
+      Base URL API Hermes.
+      Collaudo: https://servizicollaudo.sky.it/hermes-st/v0
+      Produzione: https://servizi.sky.it/hermes/v0
 
-  RexTimeoutMs:
-    Type: Number
-    Default: 10000
+  HermesSecretName:
+    Type: String
+    Default: "prod/hermes/call-me-now"
+    Description: >
+      Nome secret Secrets Manager per le credenziali Hermes Basic Auth
+      (chiavi: username, password). Usato solo quando attivato nel codice.
+
+  HermesTimeoutMs:
+    Type: String
+    Default: "10000"
     Description: Timeout chiamata Hermes in millisecondi
+
+  ConsumerBatchSize:
+    Type: Number
+    Default: 10
+    Description: Messaggi SQS per batch consumer (max 10 per limite SQS)
 
   AlertEmail:
     Type: String
     Default: ""
-    Description: "Email per alert CloudWatch DLQ (opzionale – lasciare vuoto per saltare)"
+    Description: Email per alert CloudWatch (opzionale – lasciare vuoto per saltare)
 
 Globals:
   Function:
-    Runtime: nodejs20.x
-    Architectures: [arm64]
-    Environment:
-      Variables:
-        AWS_NODEJS_CONNECTION_REUSE_ENABLED: "1"
+    Runtime: python3.14
+    Architectures: [x86_64]
+    MemorySize: 256
 
 Resources:
-
-  # ── Dead Letter Queue ────────────────────────────────────────────────────────
-  RiallineamentoDLQ:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: riallineamento-consensi-dlq
-      MessageRetentionPeriod: 1209600  # 14 giorni
-
-  # ── Coda principale ──────────────────────────────────────────────────────────
-  RiallineamentoQueue:
-    Type: AWS::SQS::Queue
-    Properties:
-      QueueName: riallineamento-consensi-queue
-      VisibilityTimeout: 60          # >= timeout Lambda consumer
-      MessageRetentionPeriod: 345600 # 4 giorni
-      RedrivePolicy:
-        deadLetterTargetArn: !GetAtt RiallineamentoDLQ.Arn
-        maxReceiveCount: 3
 
   # ── Lambda producer ──────────────────────────────────────────────────────────
   ProducerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: riallineamento-consensi-producer
+      FunctionName: crm-dmf-consent-producer
       CodeUri: producer/
       Handler: producer.handler
       Timeout: 300   # 5 minuti
-      MemorySize: 512
-      Description: Legge il DB a pagine e pubblica su SQS
+      Description: Legge RDS HOT a pagine e pubblica su SQS
       Environment:
         Variables:
-          DB_SECRET_NAME: !Ref DbSecretName
-          DB_NAME: !Ref DbName
-          DB_TABLE: !Ref DbTable
-          SQS_QUEUE_URL: !Ref RiallineamentoQueue
-          PAGE_SIZE: !Ref PageSize
-      Policies:
-        - SQSSendMessagePolicy:
-            QueueName: !GetAtt RiallineamentoQueue.QueueName
-        - AWSSecretsManagerGetSecretValuePolicy:
-            SecretArn: !Sub "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:${DbSecretName}*"
+          DB_SECRET_NAME: prod/dmf/db/hot
+          DB_HOST: sky-dmf-prod-hot-db.cvmeoqosyucw.eu-west-1.rds.amazonaws.com
+          DB_PORT: "6543"
+          DB_NAME: sky-dmf-prod-hot-db
+          DB_SCHEMA: AUDIT
+          DB_TABLE: audit_sky_recs_recommendation
+          SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
+          PAGE_SIZE: "500"
+          AUDIT_BUCKET: !Ref AuditBucket
 
   # ── Lambda consumer ──────────────────────────────────────────────────────────
   ConsumerFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: riallineamento-consensi-consumer
+      FunctionName: crm-dmf-consent-consumer
       CodeUri: consumer/
       Handler: consumer.handler
       Timeout: 30
-      MemorySize: 256
-      Description: Legge SQS e chiama API Rex
+      Description: Legge SQS e chiama Hermes MDW per opt-in/opt-out
       Environment:
         Variables:
-          REX_BASE_URL: !Ref HermesBaseUrl
-          REX_TIMEOUT_MS: !Ref RexTimeoutMs
+          HERMES_BASE_URL: !Ref HermesBaseUrl
+          HERMES_SECRET_NAME: !Ref HermesSecretName
+          HERMES_TIMEOUT_MS: !Ref HermesTimeoutMs
+          AUDIT_BUCKET: !Ref AuditBucket
       Events:
         SQSEvent:
           Type: SQS
           Properties:
-            Queue: !GetAtt RiallineamentoQueue.Arn
+            Queue: arn:aws:sqs:eu-west-1:654654357496:crm-dmf-consent-queue
             BatchSize: !Ref ConsumerBatchSize
             FunctionResponseTypes:
-              - ReportBatchItemFailures  # solo i messaggi falliti tornano in coda
+              - ReportBatchItemFailures
 
   # ── CloudWatch alarm DLQ ─────────────────────────────────────────────────────
   DLQAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: riallineamento-consensi-dlq-not-empty
+      AlarmName: crm-dmf-consent-dlq-not-empty
       AlarmDescription: Messaggi in DLQ – analizzare CloudWatch Logs e avviare redrive
       Namespace: AWS/SQS
       MetricName: ApproximateNumberOfMessagesVisible
       Dimensions:
         - Name: QueueName
-          Value: !GetAtt RiallineamentoDLQ.QueueName
+          Value: crm-dmf-consent-dlq
       Statistic: Sum
       Period: 60
       EvaluationPeriods: 1
@@ -137,8 +122,8 @@ Resources:
   ConsumerErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: riallineamento-consensi-consumer-errors
-      AlarmDescription: "Errori Lambda consumer > 100 in 5 min – verificare disponibilità Rex"
+      AlarmName: crm-dmf-consent-consumer-errors
+      AlarmDescription: "Errori Lambda consumer > 100 in 5 min – verificare disponibilità Hermes"
       Namespace: AWS/Lambda
       MetricName: Errors
       Dimensions:
@@ -154,8 +139,8 @@ Resources:
   ConsumerDurationAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: riallineamento-consensi-consumer-duration
-      AlarmDescription: "p95 duration Lambda consumer > 25s – possibile timeout Rex"
+      AlarmName: crm-dmf-consent-consumer-duration
+      AlarmDescription: "p95 duration Lambda consumer > 25s – possibile timeout Hermes"
       Namespace: AWS/Lambda
       MetricName: Duration
       Dimensions:
@@ -168,15 +153,23 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       TreatMissingData: notBreaching
 
+  # ── Lambda reconciler ───────────────────────────────────────────────────────
+  ReconcilerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: crm-dmf-consent-reconciler
+      CodeUri: reconciler/
+      Handler: reconciler.handler
+      Timeout: 300   # 5 minuti — può leggere molti file S3
+      Description: >
+        Legge gli outcome S3 di un run, ri-pubblica su SQS i soli errori retryable
+        (timeout/502/503/504) e scrive un report per quelli non recuperabili.
+      Environment:
+        Variables:
+          AUDIT_BUCKET: !Ref AuditBucket
+          SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
+
 Outputs:
-  QueueUrl:
-    Description: URL coda SQS principale
-    Value: !Ref RiallineamentoQueue
-
-  DLQUrl:
-    Description: URL Dead Letter Queue
-    Value: !Ref RiallineamentoDLQ
-
   ProducerFunctionArn:
     Description: ARN Lambda producer
     Value: !GetAtt ProducerFunction.Arn
