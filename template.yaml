@@ -14,10 +14,10 @@ Description: Riallineamento massivo consensi CRM/Rex – Lambda Producer/Consume
 #   bucket S3  crm-dmf-consent-audit (eu-west-1)
 #              lifecycle consigliata: published/outcomes 90gg, summary 1 anno
 #
-# DA COMPLETARE: il producer si connette a un RDS in VPC privata, quindi
-# necessita di subnet e security group. Gli ID dei security group sono attesi
-# da Terraform; finché non vengono configurati sulla funzione, la connessione
-# al DB va in timeout.
+# Rete: il producer raggiunge un RDS in VPC privata. Subnet e security group
+# sono impostati direttamente nella configurazione della funzione, insieme al
+# resto. Senza, la connessione al DB va in timeout dopo tre tentativi con un
+# errore che non indica la causa.
 # ────────────────────────────────────────────────────────────────────────────────
 
 Parameters:
