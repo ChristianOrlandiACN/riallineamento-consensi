@@ -22,6 +22,12 @@ AUDIT_BUCKET = os.environ.get("AUDIT_BUCKET", "")
 RUN_ID = os.environ.get("RUN_ID", "riallineamento")
 LEASE_SECONDS = int(os.environ.get("LEASE_SECONDS", "360"))
 
+# Tetto di record per invocazione. 0 = nessun limite.
+# Serve al collaudo: si parte con un valore basso (es. 25), si verificano gli
+# esiti su Hermes, poi si azzera per lasciar correre la campagna. Il segnaposto
+# fa sì che la ripresa avvenga dal record successivo, senza rilavorare i primi.
+MAX_RECORDS = int(os.environ.get("MAX_RECORDS", "0"))
+
 SAFETY_MARGIN_MS = 30_000
 
 
@@ -30,7 +36,9 @@ def handler(event, context):
     Invocata ripetutamente da EventBridge finché la campagna non è completa.
     Il punto di ripresa è su audit.consent_realign_state, non nell'evento.
     """
-    run_id = (event or {}).get("runId") or RUN_ID
+    event = event or {}
+    run_id = event.get("runId") or RUN_ID
+    max_records = MAX_RECORDS if event.get("maxRecords") is None else int(event["maxRecords"])
 
     credentials = get_db_credentials(DB_SECRET_NAME)
     conn = create_connection(credentials, DB_HOST, DB_PORT, DB_NAME)
@@ -45,11 +53,12 @@ def handler(event, context):
             return {"skipped": True, "runId": run_id}
 
         logger.info(
-            "Lease acquisito. runId=%s ripresa da cursore=%s",
+            "Lease acquisito. runId=%s ripresa da cursore=%s limite=%s",
             run_id, last_cursor or "(inizio tabella)",
+            max_records if max_records else "nessuno",
         )
 
-        result = _process_pages(conn, context, run_id, last_cursor)
+        result = _process_pages(conn, context, run_id, last_cursor, max_records)
 
         # Rilascio solo sul percorso pulito: in caso di eccezione il lease scade
         # da solo dopo LEASE_SECONDS e la schedulazione successiva riprende,
@@ -60,10 +69,11 @@ def handler(event, context):
         conn.close()
 
 
-def _process_pages(conn, context, run_id: str, last_cursor: str) -> dict:
+def _process_pages(conn, context, run_id: str, last_cursor: str, max_records: int) -> dict:
     total_published = 0
     page_count = 0
     completed = False
+    limit_reached = False
 
     while True:
         # Uscire prima del timeout duro garantisce che il segnaposto e il
@@ -75,7 +85,20 @@ def _process_pages(conn, context, run_id: str, last_cursor: str) -> dict:
             )
             break
 
-        rows = query_page(conn, DB_SCHEMA, DB_TABLE, last_cursor, PAGE_SIZE)
+        page_size = PAGE_SIZE
+        if max_records:
+            residuo = max_records - total_published
+            if residuo <= 0:
+                limit_reached = True
+                logger.warning(
+                    "Limite di %d record raggiunto. runId=%s cursore=%s — azzerare MAX_RECORDS "
+                    "per proseguire dal record successivo",
+                    max_records, run_id, last_cursor,
+                )
+                break
+            page_size = min(PAGE_SIZE, residuo)
+
+        rows = query_page(conn, DB_SCHEMA, DB_TABLE, last_cursor, page_size)
         if not rows:
             completed = True
             break
@@ -95,6 +118,7 @@ def _process_pages(conn, context, run_id: str, last_cursor: str) -> dict:
 
     summary = {
         "completed": completed,
+        "limitReached": limit_reached,
         "runId": run_id,
         "totalPublished": total_published,
         "pageCount": page_count,

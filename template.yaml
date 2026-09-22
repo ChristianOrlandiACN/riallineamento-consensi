@@ -72,6 +72,16 @@ Parameters:
       Lasciare false al deploy. Attivare solo quando la campagna deve partire,
       cioè dopo il refresh dati e la creazione dell'indice sulla tabella sorgente.
 
+  MaxRecords:
+    Type: String
+    Default: "25"
+    Description: >
+      Tetto di record pubblicati per invocazione. 0 = nessun limite.
+      Parte a 25 per il collaudo: si verifica l'esito su Hermes, poi si azzera
+      per lasciar correre la campagna, che riprende dal record successivo.
+      ATTENZIONE: tenere la schedulazione disattivata finché il limite è attivo,
+      altrimenti il processo avanza 25 record ogni cinque minuti.
+
   LeaseSeconds:
     Type: String
     Default: "360"
@@ -110,6 +120,7 @@ Resources:
           AUDIT_BUCKET: !Ref AuditBucket
           RUN_ID: !Ref RunId
           LEASE_SECONDS: !Ref LeaseSeconds
+          MAX_RECORDS: !Ref MaxRecords
       Events:
         ScheduledRun:
           Type: Schedule
