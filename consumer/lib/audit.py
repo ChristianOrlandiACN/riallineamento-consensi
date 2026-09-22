@@ -25,8 +25,26 @@ def write_outcomes(bucket: str, run_id: str, outcomes: list[dict]) -> None:
     """
     if not outcomes:
         return
-    key = f"audit/{run_id}/outcomes/{uuid.uuid4()}.jsonl"
-    body = "\n".join(json.dumps(o, default=str) for o in outcomes) + "\n"
+    _put_jsonl(bucket, f"audit/{run_id}/outcomes/{uuid.uuid4()}.jsonl", outcomes)
+
+
+def write_errors(bucket: str, run_id: str, outcomes: list[dict]) -> None:
+    """
+    Flusso compatto dei soli errori, in audit/{run_id}/errors/.
+
+    Duplica un sottoinsieme di write_outcomes di proposito: il reconciler deve
+    poter risalire alla causa di ogni fallimento senza scorrere un file di
+    outcome per ogni invocazione del consumer (su 1.8M record sarebbero 180.000
+    oggetti, illeggibili nel tempo di una Lambda).
+    """
+    errors = [o for o in outcomes if o.get("status") == "error"]
+    if not errors:
+        return
+    _put_jsonl(bucket, f"audit/{run_id}/errors/{uuid.uuid4()}.jsonl", errors)
+
+
+def _put_jsonl(bucket: str, key: str, records: list[dict]) -> None:
+    body = "\n".join(json.dumps(r, default=str) for r in records) + "\n"
     try:
         _s3.put_object(
             Bucket=bucket,

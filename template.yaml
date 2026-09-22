@@ -211,12 +211,14 @@ Resources:
       Handler: reconciler.handler
       Timeout: 300   # 5 minuti — può leggere molti file S3
       Description: >
-        Legge gli outcome S3 di un run, ri-pubblica su SQS i soli errori retryable
-        (timeout/502/503/504) e scrive un report per quelli non recuperabili.
+        Svuota la DLQ classificando ogni fallimento: ri-pubblica sulla coda
+        principale i soli errori recuperabili (timeout/502/503/504) e scrive un
+        report su S3 per quelli che richiedono intervento manuale.
       Environment:
         Variables:
           AUDIT_BUCKET: !Ref AuditBucket
           SQS_QUEUE_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-queue
+          DLQ_URL: https://sqs.eu-west-1.amazonaws.com/654654357496/crm-dmf-consent-dlq
 
 Outputs:
   ProducerFunctionArn:

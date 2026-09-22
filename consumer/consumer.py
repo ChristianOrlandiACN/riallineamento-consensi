@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from lib.hermes import update_consent, HermesError
-from lib.audit import write_outcomes
+from lib.audit import write_outcomes, write_errors
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -23,10 +23,21 @@ def handler(event, context):
         try:
             payload = json.loads(body_raw)
         except (json.JSONDecodeError, ValueError):
+            # Senza questa riga il messaggio sparirebbe dall'audit e i conteggi
+            # di fine campagna non tornerebbero, senza indizi sul perché.
             logger.error(
                 "Non-parseable message body, discarding. messageId=%s body=%s",
                 message_id, body_raw[:200],
             )
+            outcomes.append({
+                "decoder_id_original": None,
+                "hasoptedoutrecommendation__c": None,
+                "status": "discarded",
+                "status_code": None,
+                "error": f"body non parsabile: {body_raw[:200]}",
+                "run_id": "unknown",
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
             continue
 
         run_id = payload.get("run_id", "unknown")
@@ -94,3 +105,4 @@ def _write_audit(outcomes: list[dict]) -> None:
         by_run.setdefault(o["run_id"], []).append(o)
     for run_id, run_outcomes in by_run.items():
         write_outcomes(AUDIT_BUCKET, run_id, run_outcomes)
+        write_errors(AUDIT_BUCKET, run_id, run_outcomes)
