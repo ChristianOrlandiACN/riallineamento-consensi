@@ -1,48 +1,62 @@
 'use strict';
 
-// TODO: impostare quando Alessandro Paggio / Gianluca De Gennaro forniscono i dettagli Rex
-const REX_ENDPOINT_URL = process.env.REX_ENDPOINT_URL;
+// Base URL configurabile per prod/collaudo tramite variabile d'ambiente
+// Prod:     https://servizi.sky.it/hermes/v0
+// Collaudo: https://servizicollaudo.sky.it/hermes-st/v0
+const REX_BASE_URL = process.env.REX_BASE_URL;
 const REX_TIMEOUT_MS = parseInt(process.env.REX_TIMEOUT_MS || '10000', 10);
+
+// TODO: aggiungere autenticazione e certificato MDW quando disponibili lato ACN
+// Il secret Secrets Manager conterrà le credenziali di connessione MDW
 
 class RexError extends Error {
   constructor(message, statusCode) {
     super(message);
     this.name = 'RexError';
     this.statusCode = statusCode;
-    // 5xx e timeout = recuperabile (retry SQS); 4xx = non recuperabile (scartat con log)
+    // 5xx e timeout = recuperabile (retry SQS); 4xx = non recuperabile (scartato con log)
     this.isRecoverable = statusCode == null || statusCode >= 500;
   }
 }
 
 /**
- * Aggiorna il consenso su Rex per il record ricevuto.
- * Il payload verrà adattato alla struttura dell'API Rex quando disponibile.
+ * Chiama l'API Hermes per aggiornare il consenso del decoder.
+ * hasoptedoutrecommendation__c === 'true'  → opt-out
+ * hasoptedoutrecommendation__c === 'false' → opt-in
  */
 async function updateConsent(record) {
-  if (!REX_ENDPOINT_URL) {
-    throw new Error('REX_ENDPOINT_URL non configurato');
+  if (!REX_BASE_URL) {
+    throw new Error('REX_BASE_URL non configurato');
   }
 
-  // TODO: aggiungere header di autenticazione quando disponibili
+  const { decoder_id_original, hasoptedoutrecommendation__c } = record;
+
+  if (!decoder_id_original) {
+    throw Object.assign(new RexError('decoder_id_original mancante nel record', 400), { isRecoverable: false });
+  }
+
+  const action = hasoptedoutrecommendation__c === 'true' ? 'opt-out' : 'opt-in';
+  const url = `${REX_BASE_URL}/devices/${encodeURIComponent(decoder_id_original)}/${action}`;
+
   let response;
   try {
-    response = await fetch(REX_ENDPOINT_URL, {
+    response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        // 'Authorization': `Bearer ${token}`,  // TODO
+        // TODO: 'Authorization': `Bearer ${token}`,        // credenziali MDW
+        // TODO: aggiungere client certificate TLS se richiesto da MDW
       },
-      body: JSON.stringify(record),
       signal: AbortSignal.timeout(REX_TIMEOUT_MS),
     });
   } catch (err) {
     // Timeout o errore di rete: recuperabile
-    throw new RexError(`Rex network error: ${err.message}`, null);
+    throw new RexError(`Hermes network error: ${err.message}`, null);
   }
 
   if (!response.ok) {
     const body = await response.text().catch(() => '');
-    throw new RexError(`Rex ${response.status}: ${body}`, response.status);
+    throw new RexError(`Hermes ${response.status} [${action}] decoder=${decoder_id_original}: ${body}`, response.status);
   }
 
   return response.json().catch(() => null);

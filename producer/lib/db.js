@@ -1,6 +1,5 @@
 'use strict';
 
-// Swap 'mysql2/promise' with 'pg' if the DB is PostgreSQL.
 const mysql = require('mysql2/promise');
 
 const MAX_RETRIES = 3;
@@ -28,14 +27,17 @@ async function createConnection(credentials, dbName) {
 }
 
 /**
- * Cursor-based pagination: efficiente su grandi dataset perché non usa OFFSET.
- * Richiede che la tabella abbia una colonna 'id' numerica e un indice su di essa.
- * Aggiornare la query quando Antonio Croce fornirà la struttura della tabella.
+ * Cursor-based pagination su decoder_id_original (varchar).
+ * Inizializzare lastCursor a '' (stringa vuota) per partire dall'inizio.
  */
-async function queryPage(connection, table, lastId, pageSize) {
+async function queryPage(connection, table, lastCursor, pageSize) {
   const [rows] = await connection.execute(
-    `SELECT * FROM \`${table}\` WHERE id > ? ORDER BY id ASC LIMIT ?`,
-    [lastId, pageSize]
+    `SELECT decoder_id_original, hasoptedoutrecommendation__c
+     FROM \`${table}\`
+     WHERE decoder_id_original > ?
+     ORDER BY decoder_id_original ASC
+     LIMIT ?`,
+    [lastCursor, pageSize]
   );
   return rows;
 }

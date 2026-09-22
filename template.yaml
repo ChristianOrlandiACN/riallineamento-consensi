@@ -9,12 +9,13 @@ Parameters:
 
   DbName:
     Type: String
-    Description: Nome del database sorgente
+    Default: AUDIT
+    Description: Schema RDS sorgente
 
   DbTable:
     Type: String
-    Default: consensi
-    Description: Nome della tabella consensi (aggiornare con struttura da Antonio Croce)
+    Default: audit_sky_recs_recommendation
+    Description: Tabella consensi su schema AUDIT
 
   PageSize:
     Type: Number
@@ -24,17 +25,17 @@ Parameters:
   ConsumerBatchSize:
     Type: Number
     Default: 10
-    Description: "Numero di messaggi SQS per batch consumer – da calibrare post rate limit Rex"
+    Description: "Numero di messaggi SQS per batch consumer – da calibrare post rate limit Hermes/MDW"
 
-  RexEndpointUrl:
+  HermesBaseUrl:
     Type: String
-    Default: "https://TODO"
-    Description: "Endpoint API Rex – da ricevere da Alessandro Paggio / Gianluca De Gennaro"
+    Default: "https://servizicollaudo.sky.it/hermes-st/v0"
+    Description: "Base URL API Hermes. Prod: https://servizi.sky.it/hermes/v0 | Collaudo: https://servizicollaudo.sky.it/hermes-st/v0"
 
   RexTimeoutMs:
     Type: Number
     Default: 10000
-    Description: Timeout chiamata Rex in millisecondi
+    Description: Timeout chiamata Hermes in millisecondi
 
   AlertEmail:
     Type: String
@@ -104,7 +105,7 @@ Resources:
       Description: Legge SQS e chiama API Rex
       Environment:
         Variables:
-          REX_ENDPOINT_URL: !Ref RexEndpointUrl
+          REX_BASE_URL: !Ref HermesBaseUrl
           REX_TIMEOUT_MS: !Ref RexTimeoutMs
       Events:
         SQSEvent:

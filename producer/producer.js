@@ -7,14 +7,14 @@ const { publishBatch } = require('./lib/sqs');
 const {
   DB_SECRET_NAME,
   DB_NAME,
-  DB_TABLE = 'consensi',
+  DB_TABLE = 'audit_sky_recs_recommendation',
   SQS_QUEUE_URL,
   PAGE_SIZE = '500',
 } = process.env;
 
-// Margine di sicurezza prima della scadenza del timeout Lambda (30 sec).
+// Margine di sicurezza prima della scadenza del timeout Lambda.
 // Se il tempo residuo scende sotto questa soglia la Lambda si ferma e restituisce
-// il lastId, che può essere passato come startId all'invocazione successiva.
+// lastCursor, da passare come startCursor all'invocazione successiva.
 const TIMEOUT_SAFETY_MS = 30_000;
 
 exports.handler = async (event, context) => {
@@ -23,8 +23,8 @@ exports.handler = async (event, context) => {
   }
 
   const pageSize = parseInt(PAGE_SIZE, 10);
-  // startId può essere passato nell'event per riprendere da dove si era fermati
-  let lastId = typeof event?.startId === 'number' ? event.startId : 0;
+  // startCursor può essere passato nell'event per riprendere da dove si era fermati
+  let lastCursor = typeof event?.startCursor === 'string' ? event.startCursor : '';
 
   const credentials = await getDbCredentials(DB_SECRET_NAME);
   const connection = await createConnection(credentials, DB_NAME);
@@ -35,13 +35,12 @@ exports.handler = async (event, context) => {
 
   try {
     while (true) {
-      // Uscita graceful: evita di essere tagliati dal timeout Lambda
       if (context.getRemainingTimeInMillis() < TIMEOUT_SAFETY_MS) {
-        console.warn(`[PRODUCER] timeout imminente, fermo a lastId=${lastId}. Rilanciare con startId=${lastId}`);
+        console.warn(`[PRODUCER] timeout imminente, fermo a lastCursor="${lastCursor}". Rilanciare con startCursor="${lastCursor}"`);
         break;
       }
 
-      const records = await queryPage(connection, DB_TABLE, lastId, pageSize);
+      const records = await queryPage(connection, DB_TABLE, lastCursor, pageSize);
 
       if (records.length === 0) {
         completed = true;
@@ -50,11 +49,11 @@ exports.handler = async (event, context) => {
 
       await publishBatch(records, SQS_QUEUE_URL);
 
-      lastId = records[records.length - 1].id;
+      lastCursor = records[records.length - 1].decoder_id_original;
       totalPublished += records.length;
       pageCount++;
 
-      console.log(`[PRODUCER] pagina ${pageCount}: +${records.length} record (totale=${totalPublished}, lastId=${lastId})`);
+      console.log(`[PRODUCER] pagina ${pageCount}: +${records.length} record (totale=${totalPublished}, lastCursor="${lastCursor}")`);
 
       if (records.length < pageSize) {
         completed = true;
@@ -65,7 +64,7 @@ exports.handler = async (event, context) => {
     await connection.end();
   }
 
-  const summary = { completed, totalPublished, pageCount, lastId };
+  const summary = { completed, totalPublished, pageCount, lastCursor };
   console.log('[PRODUCER] fine esecuzione:', JSON.stringify(summary));
   return summary;
 };
